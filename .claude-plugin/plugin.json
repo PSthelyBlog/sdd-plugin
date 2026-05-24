@@ -1,0 +1,8 @@
+{
+  "name": "sdd",
+  "version": "0.1.0",
+  "description": "Simulation-Driven Development: build production state machines, verify by simulation, then connect I/O adapters. Six skills cover decomposition, machine authoring, convergence checking, diagnosis, and adapter scaffolding.",
+  "author": "Simulation-Driven Development project",
+  "homepage": "https://github.com/PSthelyBlog/simulation-driven-development",
+  "license": "MIT"
+}

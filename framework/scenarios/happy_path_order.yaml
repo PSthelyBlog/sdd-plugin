@@ -1,0 +1,28 @@
+scenario: happy_path_order
+narrative: "Order flows from creation to completion"
+
+setup:
+  - create: OrderLifecycle("ord_1")
+    context:
+      order_id: "ord_1"
+      customer_id: "cust_1"
+      items:
+        - sku: "WIDGET"
+          quantity: 2
+
+steps:
+  - fire: OrderLifecycle("ord_1").validate
+  - fire: OrderLifecycle("ord_1").fulfill
+    args:
+      warehouse_id: "WH_EAST"
+  - fire: OrderLifecycle("ord_1").complete
+
+expect:
+  states:
+    OrderLifecycle("ord_1"): completed
+  events_emitted:
+    - order.validated
+    - order.fulfilled
+    - order.completed
+  events_not_emitted:
+    - order.cancelled

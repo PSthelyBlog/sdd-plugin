@@ -1,0 +1,27 @@
+[project]
+name = "sdd"
+version = "0.1.0"
+description = "Simulation-Driven Development Framework"
+requires-python = ">=3.10"
+dependencies = [
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=9.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+# Without this, setuptools' auto-discovery refuses to guess because the repo
+# has multiple top-level directories (sdd/, machines/, scenarios/, invariants/,
+# adapters/). The library is `sdd`; the others are reference scaffolding that
+# user projects copy into their own repos. Limit packaging to `sdd*`.
+[tool.setuptools.packages.find]
+include = ["sdd*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
