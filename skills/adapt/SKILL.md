@@ -211,7 +211,7 @@ def test_e2e_matches_simulation(tmp_path):
 
 Plus a **process-boundary survival test** if persistence is involved: tear down the runner mid-scenario, spin up a fresh one against the same DB, complete the scenario. Confirms `snapshot()/restore()` works.
 
-See `tests/test_integration_e2e.py` in the framework repo for a worked example.
+See `framework/tests/test_integration_e2e.py` for a worked example.
 
 ### 6. Suggest the next step
 
@@ -230,10 +230,10 @@ If the user's adapter draft violates rule 1, redirect — that business rule bel
 
 ## Reference implementations
 
-The framework repo at `github.com/PSthelyBlog/simulation-driven-development` ships two reference adapters:
+The plugin bundles two reference adapters at `framework/adapters/`:
 
-- `adapters/outbound/sqlite_persistence.py` — bidirectional persistence (~95 lines, stdlib only)
-- `adapters/inbound/http_api.py` — HTTP via stdlib `http.server` (~115 lines, no deps)
+- `framework/adapters/outbound/sqlite_persistence.py` — bidirectional persistence (~95 lines, stdlib only)
+- `framework/adapters/inbound/http_api.py` — HTTP via stdlib `http.server` (~115 lines, no deps)
 
 Use these as templates. They demonstrate both the protocol satisfied by class duck-typing and the `runner.attach(...)` / `with runner:` lifecycle.
 

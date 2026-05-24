@@ -14,7 +14,7 @@ You are doing Phase 1 of SDD: turning an approved decomposition brief into a wor
 
 ## Reference: the protocol
 
-Every machine satisfies this contract (see `docs/02-state-machine-protocol.md` in the framework repo):
+Every machine satisfies this contract (see `framework/docs/02-state-machine-protocol.md` for the full spec):
 
 - Subclass `StateMachine` from `sdd.protocol`
 - Exactly one `State(initial=True)` and at least one `State(final=True)`
