@@ -103,8 +103,24 @@ class AssertStep:
     context: dict | None = None  # MachineName("id"): {field: value}
 
 
+@dataclass
+class EmitStep:
+    """Inject a synthetic event onto the bus, routed as if by an adapter.
+
+    Unlike ``FireStep``, which calls a transition directly on a known
+    instance, ``EmitStep`` puts an event on the bus and lets the runner's
+    resolvers route it to subscribers. Use this to exercise subscription
+    paths whose triggering events are normally emitted only by inbound
+    adapters.
+    """
+
+    name: str  # Event name (required)
+    payload: dict = field(default_factory=dict)  # Event payload
+    correlation_id: str = ""  # Optional correlation identifier
+
+
 # Union type for all step types
-Step = CreateStep | FireStep | AdvanceTimeStep | AssertStep
+Step = CreateStep | FireStep | AdvanceTimeStep | AssertStep | EmitStep
 
 
 @dataclass
@@ -228,9 +244,11 @@ class ScenarioParser:
             return self._parse_advance_time_step(step_data)
         elif "assert" in step_data:
             return self._parse_assert_step(step_data)
+        elif "emit" in step_data:
+            return self._parse_emit_step(step_data)
         else:
             raise ScenarioParseError(
-                f"Unknown step type. Expected 'create', 'fire', 'advance_time', or 'assert'"
+                f"Unknown step type. Expected 'create', 'fire', 'advance_time', 'assert', or 'emit'"
             )
 
     def _parse_create_step(self, step_data: dict[str, Any]) -> CreateStep:
@@ -263,6 +281,28 @@ class ScenarioParser:
             days=time_data.get("days", 0),
             hours=time_data.get("hours", 0),
             minutes=time_data.get("minutes", 0),
+        )
+
+    def _parse_emit_step(self, step_data: dict[str, Any]) -> EmitStep:
+        """Parse an emit step."""
+        emit_data = step_data["emit"]
+        if not isinstance(emit_data, dict):
+            raise ScenarioParseError(
+                "emit must be a mapping with 'name' and optional 'payload'"
+            )
+        name = emit_data.get("name")
+        if not isinstance(name, str) or not name:
+            raise ScenarioParseError("emit step requires a 'name' field")
+        payload = emit_data.get("payload", {})
+        if payload is None:
+            payload = {}
+        if not isinstance(payload, dict):
+            raise ScenarioParseError("emit 'payload' must be a mapping")
+        correlation_id = emit_data.get("correlation_id", "") or ""
+        return EmitStep(
+            name=name,
+            payload=payload,
+            correlation_id=correlation_id,
         )
 
     def _parse_assert_step(self, step_data: dict[str, Any]) -> AssertStep:
@@ -384,6 +424,18 @@ class ScenarioRunner:
                                     f"{error.error_type} - {error.message}"
                                 )
                                 break
+                    elif isinstance(step, EmitStep):
+                        # Emit steps have no expect_failure concept; any error
+                        # in the routed cascade (schema violation, transition
+                        # error) fails the scenario.
+                        if result.errors:
+                            error = result.errors[0]
+                            failure_step = i
+                            failure_reason = (
+                                f"Emit '{step.name}' produced error: "
+                                f"{error.error_type} - {error.message}"
+                            )
+                            break
 
             except Exception as e:
                 failure_step = i
@@ -480,6 +532,8 @@ class ScenarioRunner:
         elif isinstance(step, AssertStep):
             self._execute_assert_step(step)
             return None
+        elif isinstance(step, EmitStep):
+            return self._execute_emit_step(step)
         else:
             raise ScenarioParseError(f"Unknown step type: {type(step)}")
 
@@ -502,6 +556,14 @@ class ScenarioRunner:
                 f"Make sure to register it with the runner."
             )
         return self._runner.fire(step.instance_id, machine_class, step.transition, **step.args)
+
+    def _execute_emit_step(self, step: EmitStep) -> "StepResult":
+        """Execute an EmitStep by injecting a synthetic event onto the bus."""
+        return self._runner.emit_event(
+            name=step.name,
+            payload=step.payload,
+            correlation_id=step.correlation_id,
+        )
 
     def _execute_advance_time_step(self, step: AdvanceTimeStep) -> None:
         """Execute an AdvanceTimeStep by advancing the runner's virtual clock."""
