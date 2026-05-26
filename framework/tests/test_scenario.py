@@ -1376,8 +1376,13 @@ steps:
             assert instance is not None
             assert instance.current_state == "done"
 
-    def test_emit_step_routing_failure_is_recorded(self):
-        """A routing failure (no resolver) is captured on the StepResult."""
+    def test_emit_step_routing_failure_fails_scenario(self):
+        """A routing failure (no resolver) fails the scenario and is recorded.
+
+        The contract of an emit step is "I expect this event to land
+        somewhere." A missing resolver or a resolver that returns None
+        means the wiring is broken; a silent green run would be a footgun.
+        """
         runner = SimulationRunner()
         runner.register(_SubscriberMachine)
         # Intentionally NOT registering a resolver
@@ -1385,7 +1390,7 @@ steps:
 
         scenario = Scenario(
             name="emit_no_resolver",
-            narrative="Emit without resolver records routing failure",
+            narrative="Emit without resolver fails the scenario",
             steps=[
                 EmitStep(name="test.trigger", payload={"id": "sub_1"}),
             ],
@@ -1393,12 +1398,80 @@ steps:
 
         result = scenario_runner.run(scenario)
 
-        # Routing failures don't populate StepResult.errors (they are a
-        # separate field), so the scenario still passes — but the routing
-        # failure should be recorded so a diagnose step can surface it.
+        assert not result.passed
+        assert "could not route" in result.failure_reason
+        assert "no_resolver_registered" in result.failure_reason
+
         step_result = result.step_results[0]
         assert any(
             rf.target_machine == "_SubscriberMachine"
             and rf.reason == "no_resolver_registered"
             for rf in step_result.routing_failures
         )
+
+    def test_emit_step_captures_downstream_cascade_emissions(self):
+        """The subscriber's transition can emit further events; all land in step result."""
+
+        class _CascadingSubscriber(StateMachine):
+            waiting = State(initial=True)
+            done = State(final=True)
+            react = waiting.to(done)
+
+            @classmethod
+            def subscriptions(cls):
+                return {"cascade.start": "react"}
+
+            def on_enter_done(self):
+                # The subscriber emits a downstream event when it transitions.
+                self.emit("cascade.downstream", {"id": self._context.get("id")})
+
+        runner = SimulationRunner()
+        runner.register(_CascadingSubscriber)
+        runner.register_resolver(_CascadingSubscriber, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_cascade",
+            narrative="Emit triggers transition that emits more",
+            steps=[
+                EmitStep(name="cascade.start", payload={"id": "c1"}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        assert result.passed, result.failure_reason
+
+        # Both the synthetic event and the downstream emission land in the
+        # step's events_emitted list — proving the runner captures the
+        # entire cascade, not just the trigger event.
+        step_result = result.step_results[0]
+        emitted_names = [e.name for e in step_result.events_emitted]
+        assert "cascade.start" in emitted_names
+        assert "cascade.downstream" in emitted_names
+        # And the downstream emission's source is the real machine, not the sentinel
+        downstream = next(e for e in step_result.events_emitted if e.name == "cascade.downstream")
+        assert downstream.source_machine == "_CascadingSubscriber"
+        assert downstream.source_instance == "c1"
+
+
+class TestEmitStepCorrelationIdValidation:
+    """Type-validation for the optional ``correlation_id`` field."""
+
+    def test_parse_emit_step_non_string_correlation_id_raises(self):
+        """correlation_id must be a string when present."""
+        yaml_content = """
+scenario: bad_corr
+narrative: "Bad correlation_id"
+steps:
+  - emit:
+      name: foo.bar
+      correlation_id: 42
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            parser = ScenarioParser()
+            with pytest.raises(ScenarioParseError, match="correlation_id"):
+                parser.parse(f.name)

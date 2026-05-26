@@ -298,7 +298,11 @@ class ScenarioParser:
             payload = {}
         if not isinstance(payload, dict):
             raise ScenarioParseError("emit 'payload' must be a mapping")
-        correlation_id = emit_data.get("correlation_id", "") or ""
+        correlation_id = emit_data.get("correlation_id", "")
+        if correlation_id is None:
+            correlation_id = ""
+        if not isinstance(correlation_id, str):
+            raise ScenarioParseError("emit 'correlation_id' must be a string")
         return EmitStep(
             name=name,
             payload=payload,
@@ -425,15 +429,28 @@ class ScenarioRunner:
                                 )
                                 break
                     elif isinstance(step, EmitStep):
-                        # Emit steps have no expect_failure concept; any error
-                        # in the routed cascade (schema violation, transition
-                        # error) fails the scenario.
+                        # Emit steps have no expect_failure concept. The
+                        # contract of an emit step is "I expect this event to
+                        # land somewhere," so both errors in the routed
+                        # cascade and routing failures (no resolver, resolver
+                        # returned None, resolver raised) fail the scenario.
+                        # Without this, a typo'd resolver or missing
+                        # registration would silently produce a green run.
                         if result.errors:
                             error = result.errors[0]
                             failure_step = i
                             failure_reason = (
                                 f"Emit '{step.name}' produced error: "
                                 f"{error.error_type} - {error.message}"
+                            )
+                            break
+                        if result.routing_failures:
+                            rf = result.routing_failures[0]
+                            failure_step = i
+                            failure_reason = (
+                                f"Emit '{step.name}' could not route to "
+                                f"{rf.target_machine}.{rf.target_transition}: "
+                                f"{rf.reason} - {rf.message}"
                             )
                             break
 

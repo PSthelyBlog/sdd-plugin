@@ -146,6 +146,14 @@ not match a registered `EVENT_SCHEMAS` entry fails the scenario with
 event's `source_machine` is set to `"_scenario"` so downstream consumers
 can distinguish it from real machine emissions in the log.
 
+The contract of `emit` is "this event should land somewhere," so an
+emit step also fails the scenario on routing failures — a missing
+resolver, a resolver that returned `None`, or a resolver that raised.
+This makes `emit` an active probe for subscription wiring: if the
+scenario passes, the event reached a subscriber and the subscriber's
+transition fired cleanly. Inspect `step_result.routing_failures` and
+`step_result.errors` on the failed step to diagnose.
+
 ### `assert`
 
 Mid-scenario assertion. Checked immediately when reached.
