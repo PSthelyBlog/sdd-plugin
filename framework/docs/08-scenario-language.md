@@ -110,6 +110,50 @@ Move the virtual clock forward, triggering any pending timeouts.
 - advance_time: {minutes: 30}
 ```
 
+### `emit`
+
+Drop an event onto the bus as if an inbound adapter had emitted it. The
+event is routed through registered resolvers; matching subscribers fire
+their transitions; target instances are looked up or implicit-created.
+
+Use `emit` (not `fire`) when the path under test starts with an external
+event — e.g. a scheduler tick, a webhook payload, or any subscription
+declared on an event no machine emits. Without `emit`, those subscription
+paths can only be exercised by standing up real adapters and writing
+integration tests.
+
+```yaml
+- emit:
+    name: loan.return_requested
+    payload:
+      loan_id: "l1"
+```
+
+An optional `correlation_id` may be supplied to thread the synthetic
+event through the event log alongside related emissions:
+
+```yaml
+- emit:
+    name: loan.return_requested
+    payload:
+      loan_id: "l1"
+    correlation_id: "req-42"
+```
+
+The synthetic event is subject to schema validation: a payload that does
+not match a registered `EVENT_SCHEMAS` entry fails the scenario with
+`schema_validation_failed`, the same way an in-machine emit would. The
+event's `source_machine` is set to `"_scenario"` so downstream consumers
+can distinguish it from real machine emissions in the log.
+
+The contract of `emit` is "this event should land somewhere," so an
+emit step also fails the scenario on routing failures — a missing
+resolver, a resolver that returned `None`, or a resolver that raised.
+This makes `emit` an active probe for subscription wiring: if the
+scenario passes, the event reached a subscriber and the subscriber's
+transition fired cleanly. Inspect `step_result.routing_failures` and
+`step_result.errors` on the failed step to diagnose.
+
 ### `assert`
 
 Mid-scenario assertion. Checked immediately when reached.

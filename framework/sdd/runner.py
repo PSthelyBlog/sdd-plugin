@@ -324,6 +324,69 @@ class SimulationRunner:
         self._current_step_result = None
         return result
 
+    def emit_event(
+        self,
+        name: str,
+        payload: dict | None = None,
+        correlation_id: str = "",
+    ) -> StepResult:
+        """
+        Inject a synthetic event onto the bus as if an adapter had emitted it.
+
+        The event is delivered through normal subscription routing — subscriber
+        resolvers fire, target instances are looked up or implicit-created, and
+        downstream transitions cascade. The returned StepResult captures the
+        full cascade in the same shape as ``fire()``: transitions fired, events
+        emitted, errors, and routing failures.
+
+        Schema validation runs first. A payload that does not match a
+        registered ``EVENT_SCHEMAS`` entry is recorded as a
+        ``schema_validation_failed`` StepError rather than crashing the
+        scenario — and the synthetic event does not enter the log.
+
+        The synthetic event's source is marked ``source_machine="_scenario"``
+        so downstream consumers can distinguish it from real machine emissions.
+        """
+        self._current_step_result = StepResult(trigger=f"emit:{name}")
+        self._cascade_depth = 0
+        self._step_index = 0
+
+        events_before = len(self._event_bus._log)
+
+        event = Event(
+            name=name,
+            payload=payload or {},
+            source_machine="_scenario",
+            source_instance="",
+            correlation_id=correlation_id,
+        )
+
+        try:
+            self._event_bus.emit(event)
+        except SchemaValidationError as exc:
+            self._current_step_result.errors.append(
+                StepError(
+                    step_index=self._step_index,
+                    machine="_scenario",
+                    instance="",
+                    transition=f"emit:{name}",
+                    error_type="schema_validation_failed",
+                    message=str(exc),
+                    machine_state_at_error="",
+                )
+            )
+
+        events_after = len(self._event_bus._log)
+        if events_after > events_before:
+            self._current_step_result.events_emitted = list(
+                self._event_bus._log[events_before:events_after]
+            )
+        self._current_step_result.cascade_depth = self._cascade_depth
+
+        result = self._current_step_result
+        self._current_step_result = None
+        return result
+
     def _fire_internal(
         self,
         machine_class: type[StateMachine],

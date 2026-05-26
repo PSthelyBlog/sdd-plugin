@@ -9,11 +9,13 @@ from pathlib import Path
 import pytest
 
 from machines.order_lifecycle import OrderLifecycle
+from sdd.protocol import State, StateMachine
 from sdd.runner import SimulationRunner
 from sdd.scenario import (
     AdvanceTimeStep,
     AssertStep,
     CreateStep,
+    EmitStep,
     ExpectBlock,
     FireStep,
     Scenario,
@@ -1091,3 +1093,385 @@ class TestGetMachineClass:
         result = runner.get_machine_class("NonExistent")
 
         assert result is None
+
+
+# =============================================================================
+# Tests for EmitStep parsing and execution
+# =============================================================================
+
+
+class _SubscriberMachine(StateMachine):
+    """Test fixture: subscribes to ``test.trigger`` and transitions to done."""
+
+    waiting = State(initial=True)
+    done = State(final=True)
+
+    react = waiting.to(done)
+
+    @classmethod
+    def subscriptions(cls):
+        return {"test.trigger": "react"}
+
+
+class _SchemaMachine(StateMachine):
+    """Test fixture: declares a schema requiring ``required_field``."""
+
+    waiting = State(initial=True)
+    done = State(final=True)
+
+    react = waiting.to(done)
+
+    EVENT_SCHEMAS = {
+        "test.schemaful": {
+            "required": ["required_field"],
+            "properties": {"required_field": {"type": "string"}},
+        }
+    }
+
+    @classmethod
+    def subscriptions(cls):
+        return {"test.schemaful": "react"}
+
+
+class TestEmitStepParsing:
+    """Tests for parsing ``- emit:`` step syntax."""
+
+    def test_parse_emit_step_minimal(self):
+        """Can parse minimal emit step with name only."""
+        yaml_content = """
+scenario: emit_minimal
+narrative: "Minimal emit"
+steps:
+  - emit:
+      name: foo.bar
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            scenario = ScenarioParser().parse(f.name)
+
+            assert len(scenario.steps) == 1
+            step = scenario.steps[0]
+            assert isinstance(step, EmitStep)
+            assert step.name == "foo.bar"
+            assert step.payload == {}
+            assert step.correlation_id == ""
+
+    def test_parse_emit_step_with_payload(self):
+        """Can parse emit step with payload and correlation_id."""
+        yaml_content = """
+scenario: emit_full
+narrative: "Emit with payload"
+steps:
+  - emit:
+      name: loan.return_requested
+      payload:
+        loan_id: "l1"
+        condition: "good"
+      correlation_id: "req-42"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            scenario = ScenarioParser().parse(f.name)
+
+            step = scenario.steps[0]
+            assert isinstance(step, EmitStep)
+            assert step.name == "loan.return_requested"
+            assert step.payload == {"loan_id": "l1", "condition": "good"}
+            assert step.correlation_id == "req-42"
+
+    def test_parse_emit_step_missing_name_raises(self):
+        """Missing 'name' field is a parse error."""
+        yaml_content = """
+scenario: bad_emit
+narrative: "Missing name"
+steps:
+  - emit:
+      payload:
+        loan_id: "l1"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            parser = ScenarioParser()
+            with pytest.raises(ScenarioParseError, match="name"):
+                parser.parse(f.name)
+
+    def test_parse_emit_step_non_mapping_raises(self):
+        """emit value must be a mapping."""
+        yaml_content = """
+scenario: bad_emit_shape
+narrative: "Bad shape"
+steps:
+  - emit: "just-a-string"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            parser = ScenarioParser()
+            with pytest.raises(ScenarioParseError, match="emit must be a mapping"):
+                parser.parse(f.name)
+
+    def test_parse_emit_step_non_mapping_payload_raises(self):
+        """emit payload must be a mapping when present."""
+        yaml_content = """
+scenario: bad_emit_payload
+narrative: "Bad payload"
+steps:
+  - emit:
+      name: foo.bar
+      payload: "not-a-dict"
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            parser = ScenarioParser()
+            with pytest.raises(ScenarioParseError, match="payload"):
+                parser.parse(f.name)
+
+
+class TestEmitStepExecution:
+    """Tests for EmitStep execution and bus-routed cascades."""
+
+    def test_emit_step_triggers_subscriber(self):
+        """An emit step routes through the bus and fires a subscriber."""
+        runner = SimulationRunner()
+        runner.register(_SubscriberMachine)
+        runner.register_resolver(_SubscriberMachine, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_triggers_subscriber",
+            narrative="Emit routes to subscriber",
+            steps=[
+                EmitStep(name="test.trigger", payload={"id": "sub_1"}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        # Scenario passes; subscriber was implicit-created and transitioned
+        assert result.passed, result.failure_reason
+        instance = runner.get(_SubscriberMachine, "sub_1")
+        assert instance is not None
+        assert instance.current_state == "done"
+
+        # StepResult captures the routed transition
+        assert len(result.step_results) == 1
+        step_result = result.step_results[0]
+        assert step_result.trigger == "emit:test.trigger"
+        assert any(
+            r.transition == "react" and r.target == "done"
+            for r in step_result.transitions_fired
+        )
+        # The synthetic event itself appears in events_emitted
+        assert any(e.name == "test.trigger" for e in step_result.events_emitted)
+
+    def test_emit_step_synthetic_event_has_scenario_source(self):
+        """The synthetic event is tagged with source_machine='_scenario'."""
+        runner = SimulationRunner()
+        runner.register(_SubscriberMachine)
+        runner.register_resolver(_SubscriberMachine, lambda e: e.payload.get("id"))
+
+        result = runner.emit_event(
+            name="test.trigger",
+            payload={"id": "sub_1"},
+            correlation_id="corr-1",
+        )
+
+        synthetic = next(e for e in result.events_emitted if e.name == "test.trigger")
+        assert synthetic.source_machine == "_scenario"
+        assert synthetic.source_instance == ""
+        assert synthetic.correlation_id == "corr-1"
+
+    def test_emit_step_schema_violation_records_error(self):
+        """Schema-violating emit is recorded as schema_validation_failed."""
+        runner = SimulationRunner()
+        runner.register(_SchemaMachine)
+        runner.register_resolver(_SchemaMachine, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_schema_violation",
+            narrative="Schema violation fails the scenario",
+            steps=[
+                # Missing required_field
+                EmitStep(name="test.schemaful", payload={"id": "sub_1"}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        assert not result.passed
+        assert "schema_validation_failed" in result.failure_reason
+
+        step_result = result.step_results[0]
+        assert len(step_result.errors) == 1
+        err = step_result.errors[0]
+        assert err.error_type == "schema_validation_failed"
+        assert "required_field" in err.message
+
+        # The bus rejected the event before logging it
+        assert all(e.name != "test.schemaful" for e in runner.event_log)
+
+    def test_emit_step_with_no_subscriber_does_not_crash(self):
+        """Emitting an event no machine subscribes to is a silent no-op."""
+        runner = SimulationRunner()
+        runner.register(_SubscriberMachine)
+        runner.register_resolver(_SubscriberMachine, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_no_subscriber",
+            narrative="Unhandled emit is a no-op",
+            steps=[
+                EmitStep(name="nobody.cares", payload={"x": 1}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        assert result.passed, result.failure_reason
+        step_result = result.step_results[0]
+        assert step_result.errors == []
+        assert step_result.routing_failures == []
+        assert step_result.transitions_fired == []
+        # The bus still accepted and logged the event
+        assert any(e.name == "nobody.cares" for e in step_result.events_emitted)
+
+    def test_emit_step_in_yaml_end_to_end(self):
+        """Full parse-and-run with an emit step in YAML."""
+        runner = SimulationRunner()
+        runner.register(_SubscriberMachine)
+        runner.register_resolver(_SubscriberMachine, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        yaml_content = """
+scenario: yaml_emit
+narrative: "Emit step in YAML"
+steps:
+  - emit:
+      name: test.trigger
+      payload:
+        id: "sub_1"
+  - assert:
+      states:
+        _SubscriberMachine("sub_1"): done
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            scenario = ScenarioParser().parse(f.name)
+            result = scenario_runner.run(scenario)
+
+            assert result.passed, result.failure_reason
+            instance = runner.get(_SubscriberMachine, "sub_1")
+            assert instance is not None
+            assert instance.current_state == "done"
+
+    def test_emit_step_routing_failure_fails_scenario(self):
+        """A routing failure (no resolver) fails the scenario and is recorded.
+
+        The contract of an emit step is "I expect this event to land
+        somewhere." A missing resolver or a resolver that returns None
+        means the wiring is broken; a silent green run would be a footgun.
+        """
+        runner = SimulationRunner()
+        runner.register(_SubscriberMachine)
+        # Intentionally NOT registering a resolver
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_no_resolver",
+            narrative="Emit without resolver fails the scenario",
+            steps=[
+                EmitStep(name="test.trigger", payload={"id": "sub_1"}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        assert not result.passed
+        assert "could not route" in result.failure_reason
+        assert "no_resolver_registered" in result.failure_reason
+
+        step_result = result.step_results[0]
+        assert any(
+            rf.target_machine == "_SubscriberMachine"
+            and rf.reason == "no_resolver_registered"
+            for rf in step_result.routing_failures
+        )
+
+    def test_emit_step_captures_downstream_cascade_emissions(self):
+        """The subscriber's transition can emit further events; all land in step result."""
+
+        class _CascadingSubscriber(StateMachine):
+            waiting = State(initial=True)
+            done = State(final=True)
+            react = waiting.to(done)
+
+            @classmethod
+            def subscriptions(cls):
+                return {"cascade.start": "react"}
+
+            def on_enter_done(self):
+                # The subscriber emits a downstream event when it transitions.
+                self.emit("cascade.downstream", {"id": self._context.get("id")})
+
+        runner = SimulationRunner()
+        runner.register(_CascadingSubscriber)
+        runner.register_resolver(_CascadingSubscriber, lambda e: e.payload.get("id"))
+        scenario_runner = ScenarioRunner(runner)
+
+        scenario = Scenario(
+            name="emit_cascade",
+            narrative="Emit triggers transition that emits more",
+            steps=[
+                EmitStep(name="cascade.start", payload={"id": "c1"}),
+            ],
+        )
+
+        result = scenario_runner.run(scenario)
+
+        assert result.passed, result.failure_reason
+
+        # Both the synthetic event and the downstream emission land in the
+        # step's events_emitted list — proving the runner captures the
+        # entire cascade, not just the trigger event.
+        step_result = result.step_results[0]
+        emitted_names = [e.name for e in step_result.events_emitted]
+        assert "cascade.start" in emitted_names
+        assert "cascade.downstream" in emitted_names
+        # And the downstream emission's source is the real machine, not the sentinel
+        downstream = next(e for e in step_result.events_emitted if e.name == "cascade.downstream")
+        assert downstream.source_machine == "_CascadingSubscriber"
+        assert downstream.source_instance == "c1"
+
+
+class TestEmitStepCorrelationIdValidation:
+    """Type-validation for the optional ``correlation_id`` field."""
+
+    def test_parse_emit_step_non_string_correlation_id_raises(self):
+        """correlation_id must be a string when present."""
+        yaml_content = """
+scenario: bad_corr
+narrative: "Bad correlation_id"
+steps:
+  - emit:
+      name: foo.bar
+      correlation_id: 42
+"""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(yaml_content)
+            f.flush()
+
+            parser = ScenarioParser()
+            with pytest.raises(ScenarioParseError, match="correlation_id"):
+                parser.parse(f.name)

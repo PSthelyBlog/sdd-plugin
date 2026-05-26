@@ -78,7 +78,9 @@ Possible issues:
 - `dead_letters` — events emitted but no machine subscribes. Two cases:
   - **Adapter-only event** (notifications, audit) — expected, no fix needed; classify in your report to the user.
   - **Missing subscription** — a downstream machine should react but doesn't. Add to that machine's `subscriptions()`.
-- `phantom_subscriptions` — subscriptions to events no machine emits. Almost always a typo in `subscriptions()` or a missing emit.
+- `phantom_subscriptions` — subscriptions to events no machine emits. Two cases:
+  - **Adapter-shaped trigger** (e.g. `*.requested`, `*.declared`, `time.*` ticks) — the event is meant to come from an inbound adapter that doesn't exist yet. Cover the subscription at the simulation layer with an `emit` step in a scenario (see `docs/08-scenario-language.md`) rather than building an integration test.
+  - **Typo or missing emit** — a misspelled event name in `subscriptions()`, or a transition that should emit the event but doesn't.
 - `guard_completeness_issues` — guarded transitions with no fallback. Remove the explicit guard from the last branch.
 
 Fix and rerun.
@@ -115,6 +117,8 @@ If `scenarios/` is empty, propose scenarios derived from three sources, per `doc
 - **Happy path** per business flow. From the user's task description.
 - **Failure path** per guarded branch. One scenario per `|` in transition declarations.
 - **Timeout path** per `@timeout`. Use `advance_time` to fire each declared timeout.
+
+When a subscription's triggering event is adapter-shaped (no machine emits it), use an `emit` step rather than firing a transition directly — this routes through the bus the same way an adapter would and exercises the resolver, so the subscription registers as covered instead of phantom.
 
 Show the proposed list to the user before writing the YAML files.
 
